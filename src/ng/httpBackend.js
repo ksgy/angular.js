@@ -6,7 +6,7 @@ var XHR = window.XMLHttpRequest || function() {
   try { return new ActiveXObject("Msxml2.XMLHTTP.3.0"); } catch (e2) {}
   try { return new ActiveXObject("Msxml2.XMLHTTP"); } catch (e3) {}
   throw minErr('$httpBackend')('noxhr', "This browser does not support XMLHttpRequest.");
-};
+}, XDR = !window.msPerformance && window.XDomainRequest || null;
 
 
 /**
@@ -28,14 +28,14 @@ var XHR = window.XMLHttpRequest || function() {
  */
 function $HttpBackendProvider() {
   this.$get = ['$browser', '$window', '$document', function($browser, $window, $document) {
-    return createHttpBackend($browser, XHR, $browser.defer, $window.angular.callbacks,
+    return createHttpBackend($browser, XHR, XDR, $browser.defer, $window.angular.callbacks,
         $document[0], $window.location.protocol.replace(':', ''));
   }];
 }
 
-function createHttpBackend($browser, XHR, $browserDefer, callbacks, rawDocument, locationProtocol) {
+function createHttpBackend($browser, XHR, XDR, $browserDefer, callbacks, rawDocument, locationProtocol) {
   // TODO(vojta): fix the signature
-  return function(method, url, post, callback, headers, timeout, withCredentials, responseType) {
+  return function(method, url, post, callback, headers, timeout, withCredentials, responseType, useXDomain) {
     var status;
     $browser.$$incOutstandingRequestCount();
     url = url || $browser.url();
@@ -56,39 +56,75 @@ function createHttpBackend($browser, XHR, $browserDefer, callbacks, rawDocument,
         delete callbacks[callbackId];
       });
     } else {
-      var xhr = new XHR();
-      xhr.open(method, url, true);
-      forEach(headers, function(value, key) {
-        if (isDefined(value)) {
-            xhr.setRequestHeader(key, value);
+      var status;
+      if (useXDomain && XDR) {
+        var xdr = new XDR();        
+        xdr.open(method.toLowerCase(), url);
+
+        // Required to XDomainRequest works
+        xdr.timeout = timeout;
+        xdr.onprogress = function() {};
+
+        xdr.ontimeout = function() {
+          completeRequest(callback, 408, 'Timeout', 'Content-Type: text/plain');
+          xdr.abort();
+        };
+
+        xdr.onload = function() {
+          completeRequest(callback, 200, xdr.responseText, 'Content-Type: ' + xdr.contentType);          
+        };
+
+        xdr.onerror = function() {
+          completeRequest(callback, 500, 'Error', 'Content-Type: text/plain');
+          xdr.abort();
+        };
+
+        
+        $browserDefer(function () {
+          xdr.send();
+        }, 0); //fix IE bug that raises '$apply already in progress' on cached requests
+
+        if (timeout > 0) {
+          $browserDefer(function() {
+            status = -1;
+            xdr.abort();
+          }, timeout);
         }
-      });
+      } else {
+        var xhr = new XHR();
+        xhr.open(method, url, true);
+        forEach(headers, function(value, key) {
+          if (isDefined(value)) {
+              xhr.setRequestHeader(key, value);
+          }
+        });
 
-      // In IE6 and 7, this might be called synchronously when xhr.send below is called and the
-      // response is in the cache. the promise api will ensure that to the app code the api is
-      // always async
-      xhr.onreadystatechange = function() {
-        if (xhr.readyState == 4) {
-          var responseHeaders = xhr.getAllResponseHeaders();
+        // In IE6 and 7, this might be called synchronously when xhr.send below is called and the
+        // response is in the cache. the promise api will ensure that to the app code the api is
+        // always async
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState == 4) {
+            var responseHeaders = xhr.getAllResponseHeaders();
 
-          // responseText is the old-school way of retrieving response (supported by IE8 & 9)
-          // response/responseType properties were introduced in XHR Level2 spec (supported by IE10)
-          completeRequest(callback,
-              status || xhr.status,
-              (xhr.responseType ? xhr.response : xhr.responseText),
-              responseHeaders);
+            // responseText is the old-school way of retrieving response (supported by IE8 & 9)
+            // response/responseType properties were introduced in XHR Level2 spec (supported by IE10)
+            completeRequest(callback,
+                status || xhr.status,
+                (xhr.responseType ? xhr.response : xhr.responseText),
+                responseHeaders);
+          }
+        };
+
+        if (withCredentials) {
+          xhr.withCredentials = true;
         }
-      };
 
-      if (withCredentials) {
-        xhr.withCredentials = true;
+        if (responseType) {
+          xhr.responseType = responseType;
+        }
+
+        xhr.send(post || null);
       }
-
-      if (responseType) {
-        xhr.responseType = responseType;
-      }
-
-      xhr.send(post || null);
     }
 
     if (timeout > 0) {
